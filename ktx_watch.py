@@ -1,7 +1,8 @@
 """KTX 빈자리(취소표) 감시 + 자동 예약.
 
 지정한 구간·날짜·시간대의 KTX를 몇 초 간격으로 조회하다가 빈자리가 나면 바로 예약하고 알린다.
-예약만 잡아 두므로 결제는 코레일톡 앱에서 직접 해야 한다(결제 기한 안에 안 하면 자동 취소).
+기본은 예약만 잡고 결제는 코레일톡 앱에서 직접 한다(결제 기한 안에 안 하면 자동 취소).
+--auto-pay를 주면 .env의 카드로 바로 결제까지 한다.
 
 예:
   python ktx_watch.py --dep 부산 --arr 서울,수서 --date 20261020 --from 1700 --to 2100
@@ -12,6 +13,7 @@ import argparse
 import os
 import platform
 import random
+import re
 import subprocess
 import sys
 import time
@@ -47,6 +49,8 @@ def parse_args():
     p.add_argument("--no-special", action="store_true", help="일반실만 (기본은 일반실 우선, 없으면 특실)")
     p.add_argument("--interval", type=float, nargs=2, default=(3.0, 5.0), metavar=("MIN", "MAX"),
                    help="조회 간격 초 (기본 3~5초 무작위). 너무 짧으면 차단될 수 있음")
+    p.add_argument("--auto-pay", action="store_true",
+                   help="예약되면 .env의 카드로 바로 결제 (기본은 예약만 하고 결제는 코레일톡에서)")
     a = p.parse_args()
     a.arrs = [s.strip() for s in a.arr.split(",") if s.strip()]
     a.time_from = a.time_from.ljust(6, "0")
@@ -131,6 +135,47 @@ def paid_ticket(korail):
         return None
 
 
+def load_card():
+    """--auto-pay용 카드 정보를 .env에서 읽고 형식을 검사한다. 값은 절대 출력하지 않는다."""
+    card = {
+        "number": re.sub(r"\D", "", os.getenv("CARD_NUMBER", "")),
+        "pw2": os.getenv("CARD_PW2", "").strip(),
+        "expire": re.sub(r"\D", "", os.getenv("CARD_EXPIRE", "")),
+        "birth": re.sub(r"\D", "", os.getenv("CARD_BIRTH", "")),
+        "installment": os.getenv("CARD_INSTALLMENT", "0").strip() or "0",
+    }
+    problems = []
+    if not 14 <= len(card["number"]) <= 16:
+        problems.append("CARD_NUMBER: 카드번호 14~16자리")
+    if not re.fullmatch(r"\d{2}", card["pw2"]):
+        problems.append("CARD_PW2: 카드 비밀번호 앞 2자리")
+    if not re.fullmatch(r"\d{2}(0[1-9]|1[0-2])", card["expire"]):
+        problems.append("CARD_EXPIRE: 유효기간 YYMM (예: 2908 = 2029년 8월)")
+    if len(card["birth"]) not in (6, 10):
+        problems.append("CARD_BIRTH: 개인카드는 생년월일 YYMMDD, 법인카드는 사업자등록번호 10자리")
+    if not card["installment"].isdigit():
+        problems.append("CARD_INSTALLMENT: 할부 개월 수 숫자 (0 = 일시불)")
+    if problems:
+        sys.exit("--auto-pay에 필요한 .env 카드 정보가 비었거나 형식이 달라요:\n  " + "\n  ".join(problems))
+    # 생년월일 6자리 = 개인(J), 사업자번호 10자리 = 법인(S)
+    card["type"] = "J" if len(card["birth"]) == 6 else "S"
+    return card
+
+
+def pay(korail, rsv, card):
+    """카드 결제. 성공하면 True, 실패하면 알리고 False."""
+    try:
+        if korail.pay_with_card(rsv, card["number"], card["pw2"], card["birth"], card["expire"],
+                                int(card["installment"]), card["type"]):
+            notify("KTX 결제 완료", f"{rsv.dep_name}→{rsv.arr_name} {rsv.price:,}원 결제·발권 완료. 감시 종료")
+            return True
+        reason = "결제 응답 실패"
+    except KorailError as e:
+        reason = str(e)
+    notify("KTX 자동 결제 실패", f"{reason} — 예약은 잡혀 있으니 코레일톡에서 직접 결제하세요")
+    return False
+
+
 def wait_for_payment(korail, rsv):
     """결제되면 True, 결제 기한이 지나 취소되면 False."""
     while True:
@@ -156,18 +201,22 @@ def main():
     kid, kpw = os.getenv("KORAIL_ID"), os.getenv("KORAIL_PW")
     if not kid or not kpw:
         sys.exit(".env에 KORAIL_ID / KORAIL_PW를 채워 주세요 (.env.example 참고).")
+    card = load_card() if ARGS.auto_pay else None
 
     korail = Korail(kid, kpw, auto_login=False)
     if not korail.login():
         sys.exit("로그인 실패: 아이디/비밀번호를 확인하세요.")
     print(f"로그인 성공. {ARGS.dep}→{','.join(ARGS.arrs)} {ARGS.date} "
-          f"{ARGS.time_from[:4]}~{ARGS.time_to[:4]} 출발, 어른 {ARGS.adults}명 감시 시작 (Ctrl+C로 종료)")
+          f"{ARGS.time_from[:4]}~{ARGS.time_to[:4]} 출발, 어른 {ARGS.adults}명 감시 시작"
+          f"{' · 자동 결제 켜짐' if card else ''} (Ctrl+C로 종료)")
 
     if paid_ticket(korail):
         sys.exit("이미 대상 시간대 승차권이 발권돼 있음 → 종료")
     held = held_reservation(korail)
     if held:
         print(f"기존 미결제 예약 발견: {held}")
+        if card and pay(korail, held, card):
+            return
         if wait_for_payment(korail, held):
             return
 
@@ -195,7 +244,12 @@ def main():
                     print(f"{datetime.now():%H:%M:%S} 예약 직전 매진: {t}")
                     continue
                 print(f"\n{rsv}")
-                notify("KTX 예약 성공", f"{rsv} — 코레일톡에서 결제하세요")
+                if card:
+                    notify("KTX 예약 성공", f"{rsv} — 자동 결제 시도")
+                    if pay(korail, rsv, card):
+                        return
+                else:
+                    notify("KTX 예약 성공", f"{rsv} — 코레일톡에서 결제하세요")
                 if wait_for_payment(korail, rsv):
                     return
                 break
