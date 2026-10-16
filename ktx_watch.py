@@ -51,6 +51,8 @@ def parse_args():
                    help="조회 간격 초 (기본 3~5초 무작위). 너무 짧으면 차단될 수 있음")
     p.add_argument("--auto-pay", action="store_true",
                    help="예약되면 .env의 카드로 바로 결제 (기본은 예약만 하고 결제는 코레일톡에서)")
+    p.add_argument("--check", action="store_true",
+                   help="설정 점검만: 로그인·조회 1회(--auto-pay면 카드 형식도) 후 종료. 예약·결제 안 함")
     a = p.parse_args()
     a.arrs = [s.strip() for s in a.arr.split(",") if s.strip()]
     a.time_from = a.time_from.ljust(6, "0")
@@ -209,6 +211,15 @@ def main():
     print(f"로그인 성공. {ARGS.dep}→{','.join(ARGS.arrs)} {ARGS.date} "
           f"{ARGS.time_from[:4]}~{ARGS.time_to[:4]} 출발, 어른 {ARGS.adults}명 감시 시작"
           f"{' · 자동 결제 켜짐' if card else ''} (Ctrl+C로 종료)")
+
+    if ARGS.check:
+        trains = list(candidates(korail, time_from()))
+        free = [t for t in trains if (t.has_general_seat() if ARGS.no_special else t.has_seat())]
+        for t in trains:
+            print(" ", t)
+        print(f"CHECK OK: 로그인 성공, 조건에 맞는 KTX {len(trains)}편 중 지금 빈자리 {len(free)}편"
+              f"{', 카드 정보 형식 OK' if card else ''}. 예약·결제는 하지 않았어요.")
+        return
 
     if paid_ticket(korail):
         sys.exit("이미 대상 시간대 승차권이 발권돼 있음 → 종료")
