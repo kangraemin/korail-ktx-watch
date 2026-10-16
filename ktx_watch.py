@@ -71,19 +71,30 @@ def time_from():
     return ARGS.time_from
 
 
+def telegram(text):
+    """텔레그램으로 보낸다. 설정 없으면 None, 성공 True, 실패 False."""
+    token, chat_id = os.getenv("TELEGRAM_BOT_TOKEN"), os.getenv("TELEGRAM_CHAT_ID")
+    if not (token and chat_id):
+        return None
+    try:
+        r = requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            data={"chat_id": chat_id, "text": text},
+            timeout=10,
+        )
+        ok = r.ok and r.json().get("ok", False)
+        if not ok:
+            print(f"텔레그램 실패: {r.json().get('description', r.status_code)}")
+        return ok
+    except (requests.RequestException, ValueError) as e:
+        print(f"텔레그램 실패: {e}")
+        return False
+
+
 def notify(title, msg):
     """터미널 출력 + (설정 시) 텔레그램 + (맥이면) 알림·음성."""
     print(f"\n*** {title}: {msg}\n", flush=True)
-    token, chat_id = os.getenv("TELEGRAM_BOT_TOKEN"), os.getenv("TELEGRAM_CHAT_ID")
-    if token and chat_id:
-        try:
-            requests.post(
-                f"https://api.telegram.org/bot{token}/sendMessage",
-                data={"chat_id": chat_id, "text": f"🚄 {title}\n{msg}"},
-                timeout=10,
-            )
-        except requests.RequestException as e:
-            print(f"텔레그램 실패: {e}")
+    telegram(f"🚄 {title}\n{msg}")
     if platform.system() == "Darwin":
         subprocess.run(
             ["osascript", "-e", f'display notification "{msg}" with title "{title}" sound name "Glass"'],
@@ -217,8 +228,10 @@ def main():
         free = [t for t in trains if (t.has_general_seat() if ARGS.no_special else t.has_seat())]
         for t in trains:
             print(" ", t)
+        tg = telegram("🚄 ktx_watch 점검: 텔레그램 알림이 정상으로 옵니다.")
+        tg_msg = {None: "텔레그램 설정 없음", True: "텔레그램 테스트 메시지 보냄", False: "텔레그램 전송 실패"}[tg]
         print(f"CHECK OK: 로그인 성공, 조건에 맞는 KTX {len(trains)}편 중 지금 빈자리 {len(free)}편"
-              f"{', 카드 정보 형식 OK' if card else ''}. 예약·결제는 하지 않았어요.")
+              f"{', 카드 정보 형식 OK' if card else ''}, {tg_msg}. 예약·결제는 하지 않았어요.")
         return
 
     if paid_ticket(korail):
