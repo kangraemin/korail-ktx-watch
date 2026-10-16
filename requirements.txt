@@ -1,0 +1,4 @@
+requests>=2.31
+python-dotenv>=1.0
+pycryptodome>=3.20
+curl_cffi>=0.7
